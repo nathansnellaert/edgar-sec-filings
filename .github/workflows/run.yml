@@ -29,6 +29,7 @@ jobs:
         SUBSETS_API_KEY: ${{ secrets.SUBSETS_API_KEY }}
         SUBSETS_CATALOG_URL: ${{ secrets.SUBSETS_CATALOG_URL }}
         SUBSETS_WAREHOUSE: ${{ secrets.SUBSETS_WAREHOUSE }}
+        SEC_USER_AGENT: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36
     - name: Commit state files
       if: always()  # Run regardless of success/failure
       run: |
