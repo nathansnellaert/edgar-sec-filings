@@ -159,7 +159,15 @@ def process_tickers():
             # Extract exchanges (list to comma-separated string)
             exchanges = metadata.get("exchanges", [])
             if exchanges:
-                record["exchanges"] = ",".join(exchanges)
+                # Handle case where exchanges might be dicts with exchange codes
+                exchange_list = []
+                for ex in exchanges:
+                    if isinstance(ex, str):
+                        exchange_list.append(ex)
+                    elif isinstance(ex, dict) and "exchange" in ex:
+                        exchange_list.append(ex["exchange"])
+                if exchange_list:
+                    record["exchanges"] = ",".join(exchange_list)
             
             # Extract former names (list to JSON string for complex structure)
             former_names = metadata.get("formerNames", [])
