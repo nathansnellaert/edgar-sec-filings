@@ -4,7 +4,7 @@ import os
 os.environ['CONNECTOR_NAME'] = 'edgar-sec-filings'
 os.environ['RUN_ID'] = 'test-final-fix'
 os.environ['ENABLE_HTTP_CACHE'] = 'false'
-os.environ['STORAGE_BACKEND'] = 'local'
+os.environ['CATALOG_TYPE'] = 'local'
 os.environ['DATA_DIR'] = 'data'
 
 # Test with just SEC_USER_AGENT set (like in GitHub Actions)
