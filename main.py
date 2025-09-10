@@ -20,7 +20,7 @@ def main():
         
     # Process and upload company metadata
     tickers_data = process_tickers()
-    upload_data(tickers_data, "company_tickers")
+    upload_data(tickers_data, "edgar_company_tickers")
     
     # Process and upload dependent assets
     filings_data = process_filings(tickers_data)
@@ -29,7 +29,7 @@ def main():
     
     facts_data = process_xbrl_facts(tickers_data)
     if facts_data.num_rows > 0:
-        upload_data(facts_data, "xbrl_company_facts")
+        upload_data(facts_data, "edgar_xbrl_company_facts")
 
 
 if __name__ == "__main__":
