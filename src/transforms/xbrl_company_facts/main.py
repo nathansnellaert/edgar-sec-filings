@@ -226,7 +226,14 @@ def run():
         dt = DeltaTable(table_uri, storage_options=storage_options)
     else:
         dt = DeltaTable(table_uri)
-    total_rows = sum(f.num_records for f in dt.get_add_actions().to_pylist())
+    add_actions = dt.get_add_actions()
+    # Handle both old API (returns list-like with to_pylist) and new API (returns RecordBatch)
+    if hasattr(add_actions, 'to_pydict'):
+        # New arro3/RecordBatch API
+        total_rows = sum(add_actions.to_pydict()['num_records'])
+    else:
+        # Old API
+        total_rows = sum(f.num_records for f in add_actions.to_pylist())
     print(f"  Delta table has {total_rows:,} rows")
 
     if total_rows < 100000:
