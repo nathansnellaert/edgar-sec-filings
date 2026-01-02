@@ -42,16 +42,20 @@ def run():
     """Transform company data from submissions into a companies dataset."""
     # Load ticker index for the basic info
     tickers = load_raw_json("company_tickers")
-    ticker_map = {str(t["cik_str"]).zfill(10): t for t in tickers}
 
-    # Iterate over all companies from ticker index (works in both local and cloud mode)
-    print(f"  Processing {len(tickers):,} company submissions...")
+    # Build map of CIK to first ticker seen (companies can have multiple tickers)
+    ticker_map = {}
+    for t in tickers:
+        cik = str(t["cik_str"]).zfill(10)
+        if cik not in ticker_map:
+            ticker_map[cik] = t
+
+    unique_ciks = list(ticker_map.keys())
+    print(f"  Processing {len(unique_ciks):,} unique companies ({len(tickers):,} ticker entries)...")
 
     records = []
     errors = 0
-    for ticker_entry in tickers:
-        cik = str(ticker_entry["cik_str"]).zfill(10)
-
+    for cik in unique_ciks:
         try:
             data = load_raw_json(f"submissions/{cik}")
         except FileNotFoundError:
