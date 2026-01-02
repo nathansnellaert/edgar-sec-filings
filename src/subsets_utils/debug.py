@@ -1,11 +1,13 @@
 import os
 import csv
-import traceback
 from datetime import datetime
 from pathlib import Path
 
+from .r2 import is_cloud_mode
+
 _log_dir = None
 _run_timestamp = None
+
 
 def _get_run_timestamp() -> str:
     global _run_timestamp
@@ -19,15 +21,24 @@ def _get_run_timestamp() -> str:
             _run_timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     return _run_timestamp
 
+
 def _get_log_dir() -> Path:
     global _log_dir
     if _log_dir is None:
-        _log_dir = Path("logs") / _get_run_timestamp()
+        # Check for explicit LOG_DIR (set by runner.py)
+        if os.environ.get('LOG_DIR'):
+            _log_dir = Path(os.environ['LOG_DIR'])
+        elif is_cloud_mode():
+            _log_dir = Path("/tmp/logs") / _get_run_timestamp()
+        else:
+            _log_dir = Path("logs") / _get_run_timestamp()
         _log_dir.mkdir(parents=True, exist_ok=True)
     return _log_dir
 
+
 def _is_logging_enabled():
     return os.environ.get('ENABLE_LOGGING', '').lower() == 'true'
+
 
 def _append_csv(filename: str, row: dict, fieldnames: list):
     if not _is_logging_enabled():
@@ -40,6 +51,7 @@ def _append_csv(filename: str, row: dict, fieldnames: list):
             writer.writeheader()
         writer.writerow(row)
 
+
 def log_http_request(method, url, status_code, duration_ms=None, error=None, **kwargs):
     _append_csv("http_requests.csv", {
         "timestamp": datetime.now().isoformat(),
@@ -50,6 +62,7 @@ def log_http_request(method, url, status_code, duration_ms=None, error=None, **k
         "duration_ms": duration_ms,
         "error": error or ""
     }, ["timestamp", "run_id", "method", "url", "status", "duration_ms", "error"])
+
 
 def log_data_output(dataset_name, row_count, size_bytes, columns=None, null_counts=None, **kwargs):
     _append_csv("data_outputs.csv", {
@@ -62,23 +75,42 @@ def log_data_output(dataset_name, row_count, size_bytes, columns=None, null_coun
         "null_counts": str(null_counts) if null_counts else ""
     }, ["timestamp", "run_id", "dataset", "rows", "size_bytes", "columns", "null_counts"])
 
+
 def log_run_start():
+    # Detect environment (cloud vs local)
+    environment = "cloud" if is_cloud_mode() else "local"
+
+    # Detect trigger (GitHub sets GITHUB_EVENT_NAME for Actions)
+    trigger = os.environ.get('GITHUB_EVENT_NAME', 'manual')
+
     _append_csv("runs.csv", {
         "timestamp": datetime.now().isoformat(),
         "run_id": os.environ.get('RUN_ID', 'unknown'),
         "event": "start",
         "status": "",
+        "environment": environment,
+        "trigger": trigger,
         "error": ""
-    }, ["timestamp", "run_id", "event", "status", "error"])
+    }, ["timestamp", "run_id", "event", "status", "environment", "trigger", "error"])
+
 
 def log_run_end(status="completed", error=None):
+    # Detect environment (cloud vs local)
+    environment = "cloud" if is_cloud_mode() else "local"
+
+    # Detect trigger
+    trigger = os.environ.get('GITHUB_EVENT_NAME', 'manual')
+
     _append_csv("runs.csv", {
         "timestamp": datetime.now().isoformat(),
         "run_id": os.environ.get('RUN_ID', 'unknown'),
         "event": "end",
         "status": status,
+        "environment": environment,
+        "trigger": trigger,
         "error": str(error) if error else ""
-    }, ["timestamp", "run_id", "event", "status", "error"])
+    }, ["timestamp", "run_id", "event", "status", "environment", "trigger", "error"])
+
 
 def log_state_change(asset, old_state, new_state):
     if not _is_logging_enabled():
@@ -99,12 +131,4 @@ def log_state_change(asset, old_state, new_state):
                 "new_value": str(new_val) if new_val is not None else ""
             }, ["timestamp", "run_id", "asset", "key", "old_value", "new_value"])
 
-def log_error(error: Exception, context: str = ""):
-    _append_csv("errors.csv", {
-        "timestamp": datetime.now().isoformat(),
-        "run_id": os.environ.get('RUN_ID', 'unknown'),
-        "error_type": type(error).__name__,
-        "message": str(error),
-        "context": context,
-        "traceback": traceback.format_exc().replace('\n', '\\n')
-    }, ["timestamp", "run_id", "error_type", "message", "context", "traceback"])
+

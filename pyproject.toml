@@ -4,13 +4,15 @@ version = "0.1.0"
 description = "SEC EDGAR filings data integration connector"
 requires-python = ">=3.11"
 dependencies = [
+    "psutil>=5.9.0",
  "boto3",
  "duckdb",
  "httpx>=0.25.0",
  "pyarrow>=14.0.0",
- "pyiceberg",
+ "deltalake>=0.17.0",
  "ratelimit>=2.2.1",
  "requests>=2.31.0",
  "sqlalchemy>=2.0.43",
  "tenacity",
+ "tqdm>=4.66.0",
 ]
