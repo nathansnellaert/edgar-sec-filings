@@ -2,16 +2,17 @@
 
 Memory-efficient approach:
 1. Process companies in batches of 500
-2. Write each batch as parquet to raw/xbrl_processed/
-3. Read all parquet files and write as partitioned Delta table
+2. Write each batch as parquet to raw/xbrl_processed/ (local mode only)
+3. Write directly to Delta table (partitioned by taxonomy)
 """
 
 import shutil
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
-from deltalake import write_deltalake
+from deltalake import write_deltalake, DeltaTable
 from subsets_utils import load_raw_json, publish, get_data_dir
+from subsets_utils.r2 import is_cloud_mode, get_storage_options, get_delta_table_uri, get_connector_name
 from transforms.xbrl_company_facts.test import test
 
 DATASET_ID = "edgar_xbrl_facts"
@@ -118,35 +119,44 @@ def extract_company_facts(cik: str) -> list[dict]:
 def run():
     """Transform XBRL facts with memory-efficient batching.
 
-    1. Process companies in batches, writing parquet files to raw/xbrl_processed/
-    2. Read all parquet files (PyArrow is memory-efficient for columnar data)
-    3. Validate the full dataset
-    4. Write once to partitioned Delta table
+    Works in both local and cloud mode by:
+    1. Loading company list from ticker index (not filesystem glob)
+    2. Processing in batches and writing directly to Delta table
     """
-    data_dir = Path(get_data_dir())
-    xbrl_dir = data_dir / "raw" / "xbrl_facts"
-    processed_dir = data_dir / "raw" / "xbrl_processed"
-
-    if not xbrl_dir.exists():
-        raise FileNotFoundError(f"No xbrl_facts directory found at {xbrl_dir}")
-
-    # Clean up any previous processed files
-    if processed_dir.exists():
-        shutil.rmtree(processed_dir)
-    processed_dir.mkdir(parents=True)
-
-    xbrl_files = list(xbrl_dir.glob("*.json")) + list(xbrl_dir.glob("*.json.gz"))
-    print(f"  Processing XBRL facts from {len(xbrl_files):,} companies in batches of {BATCH_SIZE}...")
+    # Load ticker index to get list of all companies (works in both local and cloud mode)
+    tickers = load_raw_json("company_tickers")
+    print(f"  Processing XBRL facts from {len(tickers):,} companies in batches of {BATCH_SIZE}...")
 
     batch_records = []
     batch_num = 0
     companies_processed = 0
     companies_with_data = 0
     total_facts = 0
+    errors = 0
 
-    for filepath in xbrl_files:
-        cik = filepath.stem.replace(".json", "")
-        records = extract_company_facts(cik)
+    # Determine output location
+    if is_cloud_mode():
+        table_uri = get_delta_table_uri(DATASET_ID)
+        storage_options = get_storage_options()
+    else:
+        data_dir = Path(get_data_dir())
+        table_path = data_dir / "subsets" / DATASET_ID
+        if table_path.exists():
+            shutil.rmtree(table_path)
+        table_uri = str(table_path)
+        storage_options = None
+
+    first_batch = True
+
+    for ticker_entry in tickers:
+        cik = str(ticker_entry["cik_str"]).zfill(10)
+
+        try:
+            records = extract_company_facts(cik)
+        except FileNotFoundError:
+            errors += 1
+            companies_processed += 1
+            continue
 
         if records:
             batch_records.extend(records)
@@ -158,46 +168,64 @@ def run():
         if companies_processed % BATCH_SIZE == 0:
             if batch_records:
                 table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
-                batch_path = processed_dir / f"batch_{batch_num:04d}.parquet"
-                pq.write_table(table, batch_path, compression="snappy")
+                mode = "overwrite" if first_batch else "append"
+                if storage_options:
+                    write_deltalake(
+                        table_uri,
+                        table,
+                        mode=mode,
+                        partition_by=["taxonomy"],
+                        schema_mode="merge",
+                        storage_options=storage_options,
+                    )
+                else:
+                    write_deltalake(
+                        table_uri,
+                        table,
+                        mode=mode,
+                        partition_by=["taxonomy"],
+                        schema_mode="merge",
+                    )
                 total_facts += len(batch_records)
-                print(f"    Batch {batch_num}: {len(batch_records):,} facts from {BATCH_SIZE} companies ({companies_processed:,}/{len(xbrl_files):,})")
+                print(f"    Batch {batch_num}: {len(batch_records):,} facts from {BATCH_SIZE} companies ({companies_processed:,}/{len(tickers):,})")
                 batch_num += 1
                 batch_records.clear()
+                first_batch = False
 
     # Write final partial batch
     if batch_records:
         table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
-        batch_path = processed_dir / f"batch_{batch_num:04d}.parquet"
-        pq.write_table(table, batch_path, compression="snappy")
+        mode = "overwrite" if first_batch else "append"
+        if storage_options:
+            write_deltalake(
+                table_uri,
+                table,
+                mode=mode,
+                partition_by=["taxonomy"],
+                schema_mode="merge",
+                storage_options=storage_options,
+            )
+        else:
+            write_deltalake(
+                table_uri,
+                table,
+                mode=mode,
+                partition_by=["taxonomy"],
+                schema_mode="merge",
+            )
         total_facts += len(batch_records)
         print(f"    Batch {batch_num}: {len(batch_records):,} facts (final batch)")
         batch_records.clear()
 
+    if errors > 0:
+        print(f"  Skipped {errors} companies with missing XBRL data")
     print(f"  Wrote {total_facts:,} total facts from {companies_with_data:,} companies")
 
-    # Read parquet batches and write directly to Delta table
-    table_path = data_dir / "subsets" / DATASET_ID
-    if table_path.exists():
-        shutil.rmtree(table_path)
-
-    print(f"  Writing partitioned Delta table from batch files...")
-    batch_files = sorted(processed_dir.glob("*.parquet"))
-    for i, batch_file in enumerate(batch_files):
-        batch_table = pq.read_table(batch_file)
-        mode = "overwrite" if i == 0 else "append"
-        write_deltalake(
-            str(table_path),
-            batch_table,
-            mode=mode,
-            partition_by=["taxonomy"],
-            schema_mode="merge",
-        )
-        print(f"    Written batch {i + 1}/{len(batch_files)}")
-
     # Validate by reading Delta table metadata (row count) without loading all data
-    from deltalake import DeltaTable
-    dt = DeltaTable(str(table_path))
+    if storage_options:
+        dt = DeltaTable(table_uri, storage_options=storage_options)
+    else:
+        dt = DeltaTable(table_uri)
     total_rows = sum(f.num_records for f in dt.get_add_actions().to_pylist())
     print(f"  Delta table has {total_rows:,} rows")
 
@@ -206,10 +234,6 @@ def run():
 
     publish(DATASET_ID, METADATA)
     print(f"  Published {DATASET_ID} partitioned by taxonomy")
-
-    # Clean up intermediate files
-    shutil.rmtree(processed_dir)
-    print(f"  Cleaned up intermediate batch files")
 
 
 if __name__ == "__main__":

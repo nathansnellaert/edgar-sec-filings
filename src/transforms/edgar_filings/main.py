@@ -1,9 +1,7 @@
 """Transform SEC EDGAR filings from submissions data."""
 
-from datetime import datetime
-from pathlib import Path
 import pyarrow as pa
-from subsets_utils import load_raw_json, upload_data, publish, get_data_dir
+from subsets_utils import load_raw_json, upload_data, publish
 from .test import test
 
 DATASET_ID = "edgar_filings"
@@ -42,21 +40,22 @@ SCHEMA = pa.schema([
 
 def run():
     """Transform filings data from submissions into a filings dataset."""
-    # Find all submission files
-    submissions_dir = Path(get_data_dir()) / "raw" / "submissions"
-    if not submissions_dir.exists():
-        raise FileNotFoundError(f"No submissions directory found at {submissions_dir}")
-
-    submission_files = list(submissions_dir.glob("*.json")) + list(submissions_dir.glob("*.json.gz"))
-    print(f"  Processing filings from {len(submission_files):,} companies...")
+    # Load ticker index to get list of all companies (works in both local and cloud mode)
+    tickers = load_raw_json("company_tickers")
+    print(f"  Processing filings from {len(tickers):,} companies...")
 
     all_records = []
     companies_processed = 0
+    errors = 0
 
-    for filepath in submission_files:
-        cik = filepath.stem.replace(".json", "")
+    for ticker_entry in tickers:
+        cik = str(ticker_entry["cik_str"]).zfill(10)
 
-        data = load_raw_json(f"submissions/{cik}")
+        try:
+            data = load_raw_json(f"submissions/{cik}")
+        except FileNotFoundError:
+            errors += 1
+            continue
 
         # Skip error entries
         if data.get("error"):
@@ -99,6 +98,8 @@ def run():
         if companies_processed % 1000 == 0:
             print(f"    Processed {companies_processed:,} companies, {len(all_records):,} filings...")
 
+    if errors > 0:
+        print(f"  Skipped {errors} companies with missing submissions")
     print(f"  Transformed {len(all_records):,} filings from {companies_processed:,} companies")
 
     table = pa.Table.from_pylist(all_records, schema=SCHEMA)

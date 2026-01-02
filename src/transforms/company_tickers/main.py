@@ -1,9 +1,7 @@
 """Transform SEC company tickers with metadata from submissions."""
 
-import os
-from pathlib import Path
 import pyarrow as pa
-from subsets_utils import load_raw_json, upload_data, publish, get_data_dir
+from subsets_utils import load_raw_json, upload_data, publish
 from .test import test
 
 DATASET_ID = "edgar_companies"
@@ -46,19 +44,19 @@ def run():
     tickers = load_raw_json("company_tickers")
     ticker_map = {str(t["cik_str"]).zfill(10): t for t in tickers}
 
-    # Find all submission files
-    submissions_dir = Path(get_data_dir()) / "raw" / "submissions"
-    if not submissions_dir.exists():
-        raise FileNotFoundError(f"No submissions directory found at {submissions_dir}")
-
-    submission_files = list(submissions_dir.glob("*.json")) + list(submissions_dir.glob("*.json.gz"))
-    print(f"  Processing {len(submission_files):,} company submissions...")
+    # Iterate over all companies from ticker index (works in both local and cloud mode)
+    print(f"  Processing {len(tickers):,} company submissions...")
 
     records = []
-    for filepath in submission_files:
-        cik = filepath.stem.replace(".json", "")
+    errors = 0
+    for ticker_entry in tickers:
+        cik = str(ticker_entry["cik_str"]).zfill(10)
 
-        data = load_raw_json(f"submissions/{cik}")
+        try:
+            data = load_raw_json(f"submissions/{cik}")
+        except FileNotFoundError:
+            errors += 1
+            continue
 
         # Skip error entries
         if data.get("error"):
@@ -85,6 +83,8 @@ def run():
             "exchanges": exchanges,
         })
 
+    if errors > 0:
+        print(f"  Skipped {errors} companies with missing submissions")
     print(f"  Transformed {len(records):,} companies")
 
     table = pa.Table.from_pylist(records, schema=SCHEMA)
