@@ -227,13 +227,18 @@ def run():
     else:
         dt = DeltaTable(table_uri)
     add_actions = dt.get_add_actions()
-    # Handle both old API (returns list-like with to_pylist) and new API (returns RecordBatch)
-    if hasattr(add_actions, 'to_pydict'):
-        # New arro3/RecordBatch API
-        total_rows = sum(add_actions.to_pydict()['num_records'])
+    # Handle different API versions - convert to PyArrow table for consistent access
+    if hasattr(add_actions, 'read_all'):
+        # arro3 RecordBatchReader - read into PyArrow table
+        pa_table = add_actions.read_all()
+        total_rows = sum(pa_table.column('num_records').to_pylist())
+    elif hasattr(add_actions, 'column'):
+        # Already a PyArrow-like table/RecordBatch
+        total_rows = sum(add_actions.column('num_records').to_pylist())
     else:
-        # Old API
-        total_rows = sum(f.num_records for f in add_actions.to_pylist())
+        # Fallback: try converting to PyArrow
+        pa_table = pa.Table.from_batches([add_actions])
+        total_rows = sum(pa_table.column('num_records').to_pylist())
     print(f"  Delta table has {total_rows:,} rows")
 
     if total_rows < 100000:
