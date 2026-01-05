@@ -2,7 +2,7 @@
 """Ingest SEC company tickers list."""
 
 from subsets_utils import save_raw_json
-from sec_client import rate_limited_get
+from utils import rate_limited_get
 
 SEC_BASE_URL = "https://www.sec.gov"
 COMPANY_TICKERS_URL = f"{SEC_BASE_URL}/files/company_tickers.json"

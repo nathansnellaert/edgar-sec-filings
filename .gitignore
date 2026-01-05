@@ -1,7 +1,7 @@
 # Only track production state
 .state/
 !.state/prod/
-http_cache/
+**/http_cache/
 logs/
 
 # Synced from template

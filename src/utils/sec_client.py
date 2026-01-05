@@ -1,9 +1,15 @@
+"""SEC API client utilities.
+
+Handles rate limiting and header requirements for SEC EDGAR API.
+"""
+
 import os
 import logging
 from ratelimit import limits, sleep_and_retry
 from subsets_utils.http_client import get
 
 logger = logging.getLogger(__name__)
+
 
 def get_user_agent():
     """Get user agent for SEC API requests.

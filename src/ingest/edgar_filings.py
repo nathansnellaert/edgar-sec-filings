@@ -7,7 +7,7 @@ in one call, so this module handles both.
 
 from tqdm import tqdm
 from subsets_utils import save_raw_json, load_raw_json, load_state, save_state
-from sec_client import rate_limited_get
+from utils import rate_limited_get
 
 SEC_BASE_URL = "https://data.sec.gov"
 
