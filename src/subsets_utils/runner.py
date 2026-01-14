@@ -17,10 +17,13 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     env = {**__import__('os').environ, 'LOG_DIR': str(log_dir), 'RUN_ID': run_id}
-    env['PYTHONPATH'] = str(Path.cwd() / 'src')
+    # Add src to PYTHONPATH so 'from subsets_utils import' works in main.py
+    src_path = str(Path.cwd() / 'src')
+    existing_pythonpath = env.get('PYTHONPATH', '')
+    env['PYTHONPATH'] = f"{src_path}:{existing_pythonpath}" if existing_pythonpath else src_path
 
     with open(log_dir / 'output.log', 'w') as f:
-        proc = subprocess.Popen([sys.executable, '-m', 'src.main'], stdout=f, stderr=subprocess.STDOUT, env=env)
+        proc = subprocess.Popen([sys.executable, '-m', 'src.main'], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=Path.cwd())
         exit_code = proc.wait()
 
     if exit_code != 0:
