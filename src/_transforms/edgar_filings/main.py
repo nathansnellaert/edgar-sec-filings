@@ -1,13 +1,12 @@
 """Transform SEC EDGAR filings from submissions data."""
 
 import pyarrow as pa
-from subsets_utils import load_raw_json, upload_data, publish
+from subsets_utils import load_raw_json, sync_data, sync_metadata
 from .test import test
 
 DATASET_ID = "edgar_filings"
 
 METADATA = {
-    "id": DATASET_ID,
     "title": "SEC EDGAR Filings",
     "description": "SEC EDGAR filings including 10-K, 10-Q, 8-K, and other forms. Contains filing dates, form types, and accession numbers for all SEC-registered companies.",
     "column_descriptions": {
@@ -106,8 +105,8 @@ def run():
 
     test(table)
 
-    upload_data(table, DATASET_ID, mode="overwrite")
-    publish(DATASET_ID, METADATA)
+    sync_data(table, DATASET_ID, mode="overwrite")
+    sync_metadata(DATASET_ID, METADATA)
 
 
 if __name__ == "__main__":

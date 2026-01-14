@@ -1,13 +1,25 @@
-"""Transform SEC company tickers with metadata from submissions."""
+"""Ingest and transform SEC company tickers.
+
+Fetches the company tickers index from SEC and transforms it into edgar_companies dataset.
+"""
+
+import os
+
+# SEC requires email in User-Agent per their fair access policy
+if 'HTTP_USER_AGENT' not in os.environ:
+    os.environ['HTTP_USER_AGENT'] = os.getenv('SEC_USER_AGENT', 'DataIntegrations/1.0 (admin@dataintegrations.io)')
 
 import pyarrow as pa
-from subsets_utils import load_raw_json, upload_data, publish
-from .test import test
+from subsets_utils import save_raw_json, load_raw_json, upload_data
+from utils import rate_limited_get
+from _transforms.company_tickers.test import test
+
+SEC_BASE_URL = "https://www.sec.gov"
+COMPANY_TICKERS_URL = f"{SEC_BASE_URL}/files/company_tickers.json"
 
 DATASET_ID = "edgar_companies"
 
 METADATA = {
-    "id": DATASET_ID,
     "title": "SEC EDGAR Companies",
     "description": "SEC-registered companies with their CIK numbers, tickers, and metadata. Includes SIC codes, state of incorporation, fiscal year end, and exchange listings.",
     "column_descriptions": {
@@ -38,7 +50,21 @@ SCHEMA = pa.schema([
 ])
 
 
-def run():
+def ingest():
+    """Fetch the company tickers index from SEC."""
+    print("  Fetching company tickers index...")
+    response = rate_limited_get(COMPANY_TICKERS_URL, host="www.sec.gov")
+    response.raise_for_status()
+    data = response.json()
+
+    # Convert from {0: {...}, 1: {...}} to list format
+    companies = list(data.values())
+
+    save_raw_json(companies, "company_tickers")
+    print(f"  Fetched {len(companies):,} company tickers")
+
+
+def transform():
     """Transform company data from submissions into a companies dataset."""
     # Load ticker index for the basic info
     tickers = load_raw_json("company_tickers")
@@ -96,7 +122,16 @@ def run():
     test(table)
 
     upload_data(table, DATASET_ID, mode="overwrite")
-    publish(DATASET_ID, METADATA)
+def run():
+    """Ingest and transform company tickers."""
+    print("\n--- Company Tickers ---")
+    ingest()
+    transform()
+
+
+NODES = {
+    run: [],
+}
 
 
 if __name__ == "__main__":

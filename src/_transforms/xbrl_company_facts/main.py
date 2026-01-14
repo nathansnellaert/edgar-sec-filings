@@ -2,24 +2,17 @@
 
 Memory-efficient approach:
 1. Process companies in batches of 500
-2. Write each batch as parquet to raw/xbrl_processed/ (local mode only)
-3. Write directly to Delta table (partitioned by taxonomy)
+2. Write each batch directly to Delta table (partitioned by taxonomy)
 """
 
-import shutil
-from pathlib import Path
 import pyarrow as pa
-import pyarrow.parquet as pq
-from deltalake import write_deltalake, DeltaTable
-from subsets_utils import load_raw_json, publish, get_data_dir
-from subsets_utils.r2 import is_cloud_mode, get_storage_options, get_delta_table_uri, get_connector_name
+from subsets_utils import load_raw_json, sync_data, sync_metadata
 from transforms.xbrl_company_facts.test import test
 
 DATASET_ID = "edgar_xbrl_facts"
 BATCH_SIZE = 500
 
 METADATA = {
-    "id": DATASET_ID,
     "title": "SEC EDGAR XBRL Financial Facts",
     "description": "Structured financial data from SEC XBRL filings. Contains standardized financial metrics (revenue, assets, liabilities, etc.) extracted from company filings using XBRL taxonomies. Partitioned by taxonomy (us-gaap, dei, srt, etc.).",
     "column_descriptions": {
@@ -123,7 +116,7 @@ def run():
     1. Loading company list from ticker index (not filesystem glob)
     2. Processing in batches and writing directly to Delta table
     """
-    # Load ticker index to get list of all companies (works in both local and cloud mode)
+    # Load ticker index to get list of all companies
     tickers = load_raw_json("company_tickers")
     print(f"  Processing XBRL facts from {len(tickers):,} companies in batches of {BATCH_SIZE}...")
 
@@ -133,19 +126,6 @@ def run():
     companies_with_data = 0
     total_facts = 0
     errors = 0
-
-    # Determine output location
-    if is_cloud_mode():
-        table_uri = get_delta_table_uri(DATASET_ID)
-        storage_options = get_storage_options()
-    else:
-        data_dir = Path(get_data_dir())
-        table_path = data_dir / "subsets" / DATASET_ID
-        if table_path.exists():
-            shutil.rmtree(table_path)
-        table_uri = str(table_path)
-        storage_options = None
-
     first_batch = True
 
     for ticker_entry in tickers:
@@ -169,23 +149,7 @@ def run():
             if batch_records:
                 table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
                 mode = "overwrite" if first_batch else "append"
-                if storage_options:
-                    write_deltalake(
-                        table_uri,
-                        table,
-                        mode=mode,
-                        partition_by=["taxonomy"],
-                        schema_mode="merge",
-                        storage_options=storage_options,
-                    )
-                else:
-                    write_deltalake(
-                        table_uri,
-                        table,
-                        mode=mode,
-                        partition_by=["taxonomy"],
-                        schema_mode="merge",
-                    )
+                sync_data(table, DATASET_ID, mode=mode, partition_by=["taxonomy"])
                 total_facts += len(batch_records)
                 print(f"    Batch {batch_num}: {len(batch_records):,} facts from {BATCH_SIZE} companies ({companies_processed:,}/{len(tickers):,})")
                 batch_num += 1
@@ -196,55 +160,17 @@ def run():
     if batch_records:
         table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
         mode = "overwrite" if first_batch else "append"
-        if storage_options:
-            write_deltalake(
-                table_uri,
-                table,
-                mode=mode,
-                partition_by=["taxonomy"],
-                schema_mode="merge",
-                storage_options=storage_options,
-            )
-        else:
-            write_deltalake(
-                table_uri,
-                table,
-                mode=mode,
-                partition_by=["taxonomy"],
-                schema_mode="merge",
-            )
+        sync_data(table, DATASET_ID, mode=mode, partition_by=["taxonomy"])
         total_facts += len(batch_records)
         print(f"    Batch {batch_num}: {len(batch_records):,} facts (final batch)")
-        batch_records.clear()
 
     if errors > 0:
         print(f"  Skipped {errors} companies with missing XBRL data")
     print(f"  Wrote {total_facts:,} total facts from {companies_with_data:,} companies")
 
-    # Validate by reading Delta table metadata (row count) without loading all data
-    if storage_options:
-        dt = DeltaTable(table_uri, storage_options=storage_options)
-    else:
-        dt = DeltaTable(table_uri)
-    add_actions = dt.get_add_actions()
-    # Handle different API versions - convert to PyArrow table for consistent access
-    if hasattr(add_actions, 'read_all'):
-        # arro3 RecordBatchReader - read into PyArrow table
-        pa_table = add_actions.read_all()
-        total_rows = sum(pa_table.column('num_records').to_pylist())
-    elif hasattr(add_actions, 'column'):
-        # Already a PyArrow-like table/RecordBatch
-        total_rows = sum(add_actions.column('num_records').to_pylist())
-    else:
-        # Fallback: try converting to PyArrow
-        pa_table = pa.Table.from_batches([add_actions])
-        total_rows = sum(pa_table.column('num_records').to_pylist())
-    print(f"  Delta table has {total_rows:,} rows")
+    test(total_facts)
 
-    if total_rows < 100000:
-        raise ValueError(f"Expected at least 100,000 rows, got {total_rows:,}")
-
-    publish(DATASET_ID, METADATA)
+    sync_metadata(DATASET_ID, METADATA)
     print(f"  Published {DATASET_ID} partitioned by taxonomy")
 
 

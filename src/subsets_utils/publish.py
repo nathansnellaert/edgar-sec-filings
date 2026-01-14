@@ -1,21 +1,18 @@
 import json
-from pathlib import Path
 from deltalake import DeltaTable
-from .environment import get_data_dir, is_cloud_mode
-from .r2 import get_delta_table_uri, get_storage_options
+from .config import subsets_uri, get_storage_options
+
 
 def publish(dataset_name: str, metadata: dict):
+    """Publish metadata to a Delta table."""
     if 'id' not in metadata:
         raise ValueError("Missing required field: 'id'")
     if 'title' not in metadata:
         raise ValueError("Missing required field: 'title'")
 
-    if is_cloud_mode():
-        table_uri = get_delta_table_uri(dataset_name)
-        dt = DeltaTable(table_uri, storage_options=get_storage_options())
-    else:
-        table_path = Path(get_data_dir()) / "subsets" / dataset_name
-        dt = DeltaTable(str(table_path))
+    uri = subsets_uri(dataset_name)
+    storage_opts = get_storage_options()
+    dt = DeltaTable(uri, storage_options=storage_opts) if storage_opts else DeltaTable(uri)
 
     if 'column_descriptions' in metadata:
         schema = dt.schema().to_pyarrow() if hasattr(dt.schema(), 'to_pyarrow') else dt.schema().to_arrow()

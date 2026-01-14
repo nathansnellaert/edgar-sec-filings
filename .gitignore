@@ -20,3 +20,4 @@ dev/
 # Synced from template
 # Output data (synced via R2, not git)
 data/
+data
