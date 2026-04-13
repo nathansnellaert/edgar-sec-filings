@@ -1,0 +1,4 @@
+data/raw/edgar_filings/dataset.csv filter=lfs diff=lfs merge=lfs -text
+data/processed/edgar_filings/dataset.parquet filter=lfs diff=lfs merge=lfs -text
+data/raw/company_tickers/dataset.csv filter=lfs diff=lfs merge=lfs -text
+data/processed/company_tickers/dataset.parquet filter=lfs diff=lfs merge=lfs -text
