@@ -1,20 +1,17 @@
-"""Ingest and transform SEC XBRL Company Facts.
+"""Download and transform SEC XBRL Company Facts.
 
 Fetches XBRL facts for all companies and transforms into edgar_xbrl_facts dataset.
-Memory-efficient batched processing.
+Uses batched processing for memory efficiency.
 """
-
-import os
-
-# SEC requires email in User-Agent per their fair access policy
-if 'HTTP_USER_AGENT' not in os.environ:
-    os.environ['HTTP_USER_AGENT'] = os.getenv('SEC_USER_AGENT', 'DataIntegrations/1.0 (admin@dataintegrations.io)')
 
 import pyarrow as pa
 from tqdm import tqdm
-from subsets_utils import save_raw_json, load_raw_json, load_state, save_state, merge, publish
+from subsets_utils import (
+    save_raw_json, load_raw_json,
+    load_state, save_state,
+    merge, publish,
+)
 from connector_utils import rate_limited_get
-from _transforms.xbrl_company_facts.test import test
 
 SEC_BASE_URL = "https://data.sec.gov"
 
@@ -24,7 +21,8 @@ BATCH_SIZE = 500
 METADATA = {
     "id": DATASET_ID,
     "title": "SEC EDGAR XBRL Financial Facts",
-    "description": "Structured financial data from SEC XBRL filings. Contains standardized financial metrics (revenue, assets, liabilities, etc.) extracted from company filings using XBRL taxonomies. Partitioned by taxonomy (us-gaap, dei, srt, etc.).",
+    "description": "Structured financial data from SEC XBRL filings. Contains standardized financial metrics (revenue, assets, liabilities, etc.) extracted from company filings using XBRL taxonomies (us-gaap, dei, srt, etc.).",
+    "license": "Public Domain (SEC EDGAR data is public and freely available)",
     "column_descriptions": {
         "cik": "Central Index Key (10-digit)",
         "entity_name": "Company name",
@@ -59,13 +57,11 @@ SCHEMA = pa.schema([
 ])
 
 
-def ingest():
+def download():
     """Fetch XBRL facts for all companies with incremental caching."""
-    # Load the ticker index
     companies = load_raw_json("company_tickers")
     print(f"  Loaded {len(companies):,} companies from ticker index")
 
-    # Track which companies we've already fetched
     state = load_state("xbrl_facts")
     completed = set(state.get("completed", []))
 
@@ -92,10 +88,7 @@ def ingest():
                 response = rate_limited_get(url)
                 response.raise_for_status()
                 data = response.json()
-
-                # Save per-company with compression (XBRL data is large)
                 save_raw_json(data, f"xbrl_facts/{cik}", compress=True)
-
             except Exception as e:
                 # Many companies don't have XBRL data (404) - that's expected
                 if "404" in str(e):
@@ -105,7 +98,6 @@ def ingest():
                     errors += 1
                     save_raw_json({"error": str(e), "cik": cik}, f"xbrl_facts/{cik}")
 
-            # Update state after each save
             completed.add(company["cik_str"])
             save_state("xbrl_facts", {"completed": sorted(completed)})
 
@@ -115,7 +107,7 @@ def ingest():
         print(f"  Encountered {errors} errors during fetch")
 
 
-def extract_company_facts(cik: str) -> list[dict]:
+def _extract_company_facts(cik: str) -> list[dict]:
     """Extract all facts from a single company's XBRL data."""
     data = load_raw_json(f"xbrl_facts/{cik}")
 
@@ -177,7 +169,6 @@ def extract_company_facts(cik: str) -> list[dict]:
 
 def transform():
     """Transform XBRL facts with memory-efficient batching."""
-    # Load ticker index to get list of all companies
     tickers = load_raw_json("company_tickers")
     print(f"  Processing XBRL facts from {len(tickers):,} companies in batches of {BATCH_SIZE}...")
 
@@ -192,7 +183,7 @@ def transform():
         cik = str(ticker_entry["cik_str"]).zfill(10)
 
         try:
-            records = extract_company_facts(cik)
+            records = _extract_company_facts(cik)
         except FileNotFoundError:
             errors += 1
             companies_processed += 1
@@ -205,20 +196,18 @@ def transform():
         companies_processed += 1
 
         # Write batch when we hit batch size
-        if companies_processed % BATCH_SIZE == 0:
-            if batch_records:
-                table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
-                merge(table, DATASET_ID, key=["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period"])
-                total_facts += len(batch_records)
-                print(f"    Batch {batch_num}: {len(batch_records):,} facts from {BATCH_SIZE} companies ({companies_processed:,}/{len(tickers):,})")
-                batch_num += 1
-                batch_records.clear()
+        if companies_processed % BATCH_SIZE == 0 and batch_records:
+            table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
+            merge(table, DATASET_ID, key=["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period"])
+            total_facts += len(batch_records)
+            print(f"    Batch {batch_num}: {len(batch_records):,} facts from {BATCH_SIZE} companies ({companies_processed:,}/{len(tickers):,})")
+            batch_num += 1
+            batch_records.clear()
 
     # Write final partial batch
     if batch_records:
         table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
         merge(table, DATASET_ID, key=["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period"])
-        publish(DATASET_ID, METADATA)
         total_facts += len(batch_records)
         print(f"    Batch {batch_num}: {len(batch_records):,} facts (final batch)")
 
@@ -226,23 +215,20 @@ def transform():
         print(f"  Skipped {errors} companies with missing XBRL data")
     print(f"  Wrote {total_facts:,} total facts from {companies_with_data:,} companies")
 
-    test(total_facts)
+    assert total_facts >= 1000000, f"Expected >= 1,000,000 XBRL facts, got {total_facts:,}"
+
+    publish(DATASET_ID, METADATA)
     print(f"  Published {DATASET_ID}")
 
 
-def run():
-    """Ingest and transform XBRL company facts."""
-    print("\n--- XBRL Company Facts ---")
-    ingest()
-    transform()
-
-
-from nodes.company_tickers import run as company_tickers_run
+from nodes.company_tickers import download as download_tickers
 
 NODES = {
-    run: [company_tickers_run],
+    download: [download_tickers],
+    transform: [download],
 }
 
 
 if __name__ == "__main__":
-    run()
+    download()
+    transform()

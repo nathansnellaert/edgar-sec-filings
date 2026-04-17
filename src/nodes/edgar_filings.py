@@ -1,28 +1,31 @@
-"""Ingest and transform SEC EDGAR filings.
+"""Download and transform SEC EDGAR filings.
 
-Fetches company submissions (metadata + filings) from SEC and transforms into edgar_filings dataset.
+Fetches company submissions (metadata + filings) from SEC and produces:
+- edgar_filings: all filing records with form types, dates, accession numbers
+- edgar_companies: company master data enriched from submission metadata
 """
-
-import os
-
-# SEC requires email in User-Agent per their fair access policy
-if 'HTTP_USER_AGENT' not in os.environ:
-    os.environ['HTTP_USER_AGENT'] = os.getenv('SEC_USER_AGENT', 'DataIntegrations/1.0 (admin@dataintegrations.io)')
 
 import pyarrow as pa
 from tqdm import tqdm
-from subsets_utils import save_raw_json, load_raw_json, load_state, save_state, merge, publish
+from subsets_utils import (
+    save_raw_json, load_raw_json,
+    load_state, save_state,
+    merge, publish, validate,
+)
+from subsets_utils.testing import assert_valid_date, assert_length
 from connector_utils import rate_limited_get
-from _transforms.edgar_filings.test import test
 
 SEC_BASE_URL = "https://data.sec.gov"
 
-DATASET_ID = "edgar_filings"
+# -- Filings dataset ----------------------------------------------------------
 
-METADATA = {
-    "id": DATASET_ID,
+FILINGS_DATASET_ID = "edgar_filings"
+
+FILINGS_METADATA = {
+    "id": FILINGS_DATASET_ID,
     "title": "SEC EDGAR Filings",
     "description": "SEC EDGAR filings including 10-K, 10-Q, 8-K, and other forms. Contains filing dates, form types, and accession numbers for all SEC-registered companies.",
+    "license": "Public Domain (SEC EDGAR data is public and freely available)",
     "column_descriptions": {
         "cik": "Central Index Key (10-digit)",
         "company_name": "Company name at time of filing",
@@ -37,7 +40,7 @@ METADATA = {
     }
 }
 
-SCHEMA = pa.schema([
+FILINGS_SCHEMA = pa.schema([
     pa.field("cik", pa.string(), nullable=False),
     pa.field("company_name", pa.string(), nullable=False),
     pa.field("form_type", pa.string(), nullable=False),
@@ -50,14 +53,52 @@ SCHEMA = pa.schema([
     pa.field("primary_document", pa.string()),
 ])
 
+# -- Companies dataset ---------------------------------------------------------
 
-def ingest():
+COMPANIES_DATASET_ID = "edgar_companies"
+
+COMPANIES_METADATA = {
+    "id": COMPANIES_DATASET_ID,
+    "title": "SEC EDGAR Companies",
+    "description": "SEC-registered companies with their CIK numbers, tickers, and metadata. Includes SIC codes, state of incorporation, fiscal year end, and exchange listings.",
+    "license": "Public Domain (SEC EDGAR data is public and freely available)",
+    "column_descriptions": {
+        "cik": "Central Index Key (10-digit, zero-padded)",
+        "ticker": "Stock ticker symbol",
+        "name": "Company name",
+        "sic_code": "Standard Industrial Classification code",
+        "sic_description": "SIC industry description",
+        "state_of_incorporation": "State/country of incorporation",
+        "fiscal_year_end": "Fiscal year end (MMDD format)",
+        "entity_type": "Entity type (e.g., operating, shell company)",
+        "ein": "Employer Identification Number",
+        "exchanges": "Stock exchanges where listed",
+    }
+}
+
+COMPANIES_SCHEMA = pa.schema([
+    pa.field("cik", pa.string(), nullable=False),
+    pa.field("ticker", pa.string()),
+    pa.field("name", pa.string(), nullable=False),
+    pa.field("sic_code", pa.string()),
+    pa.field("sic_description", pa.string()),
+    pa.field("state_of_incorporation", pa.string()),
+    pa.field("fiscal_year_end", pa.string()),
+    pa.field("entity_type", pa.string()),
+    pa.field("ein", pa.string()),
+    pa.field("exchanges", pa.list_(pa.string())),
+])
+
+
+# =============================================================================
+# Download
+# =============================================================================
+
+def download():
     """Fetch submissions for all companies with incremental caching."""
-    # Load the ticker index
     companies = load_raw_json("company_tickers")
     print(f"  Loaded {len(companies):,} companies from ticker index")
 
-    # Track which companies we've already fetched
     state = load_state("submissions")
     completed = set(state.get("completed", []))
 
@@ -83,16 +124,11 @@ def ingest():
                 response = rate_limited_get(url)
                 response.raise_for_status()
                 data = response.json()
-
-                # Save per-company (includes metadata + filings)
                 save_raw_json(data, f"submissions/{cik}")
-
             except Exception as e:
                 errors += 1
-                # Save error marker to avoid retrying
                 save_raw_json({"error": str(e), "cik": cik}, f"submissions/{cik}")
 
-            # Update state after each save
             completed.add(company["cik_str"])
             save_state("submissions", {"completed": sorted(completed)})
 
@@ -100,9 +136,12 @@ def ingest():
         print(f"  Encountered {errors} errors during fetch")
 
 
-def transform():
-    """Transform filings data from submissions into a filings dataset."""
-    # Load ticker index to get list of all companies
+# =============================================================================
+# Transform: filings
+# =============================================================================
+
+def transform_filings():
+    """Transform filings data from submissions into edgar_filings dataset."""
     tickers = load_raw_json("company_tickers")
     print(f"  Processing filings from {len(tickers):,} companies...")
 
@@ -119,7 +158,6 @@ def transform():
             errors += 1
             continue
 
-        # Skip error entries
         if data.get("error"):
             continue
 
@@ -129,7 +167,6 @@ def transform():
         if not recent_filings:
             continue
 
-        # Extract filing arrays
         forms = recent_filings.get("form", [])
         filing_dates = recent_filings.get("filingDate", [])
         accession_numbers = recent_filings.get("accessionNumber", [])
@@ -164,25 +201,102 @@ def transform():
         print(f"  Skipped {errors} companies with missing submissions")
     print(f"  Transformed {len(all_records):,} filings from {companies_processed:,} companies")
 
-    table = pa.Table.from_pylist(all_records, schema=SCHEMA)
+    table = pa.Table.from_pylist(all_records, schema=FILINGS_SCHEMA)
 
-    test(table)
+    validate(table, {
+        "columns": {"cik": "string", "form_type": "string", "filing_date": "string", "accession_number": "string"},
+        "not_null": ["cik", "company_name", "form_type", "filing_date", "accession_number"],
+        "unique": ["accession_number"],
+        "min_rows": 100000,
+    })
+    assert_length(table, "cik", 10)
+    assert_valid_date(table, "filing_date")
 
-    merge(table, DATASET_ID, key="accession_number")
-    publish(DATASET_ID, METADATA)
-def run():
-    """Ingest and transform edgar filings."""
-    print("\n--- EDGAR Filings ---")
-    ingest()
-    transform()
+    merge(table, FILINGS_DATASET_ID, key="accession_number")
+    publish(FILINGS_DATASET_ID, FILINGS_METADATA)
 
 
-from nodes.company_tickers import run as company_tickers_run
+# =============================================================================
+# Transform: companies
+# =============================================================================
+
+def transform_companies():
+    """Transform company metadata from submissions into edgar_companies dataset."""
+    tickers = load_raw_json("company_tickers")
+
+    # Build map of CIK to first ticker seen (companies can have multiple tickers)
+    ticker_map = {}
+    for t in tickers:
+        cik = str(t["cik_str"]).zfill(10)
+        if cik not in ticker_map:
+            ticker_map[cik] = t
+
+    unique_ciks = list(ticker_map.keys())
+    print(f"  Processing {len(unique_ciks):,} unique companies ({len(tickers):,} ticker entries)...")
+
+    records = []
+    errors = 0
+    for cik in unique_ciks:
+        try:
+            data = load_raw_json(f"submissions/{cik}")
+        except FileNotFoundError:
+            errors += 1
+            continue
+
+        if data.get("error"):
+            continue
+
+        ticker_info = ticker_map.get(cik, {})
+
+        exchanges = data.get("exchanges", [])
+        if not exchanges:
+            exchanges = None
+
+        records.append({
+            "cik": cik,
+            "ticker": ticker_info.get("ticker") or (data.get("tickers", [None])[0] if data.get("tickers") else None),
+            "name": data.get("name") or ticker_info.get("title", ""),
+            "sic_code": data.get("sic"),
+            "sic_description": data.get("sicDescription"),
+            "state_of_incorporation": data.get("stateOfIncorporation"),
+            "fiscal_year_end": data.get("fiscalYearEnd"),
+            "entity_type": data.get("entityType"),
+            "ein": data.get("ein"),
+            "exchanges": exchanges,
+        })
+
+    if errors > 0:
+        print(f"  Skipped {errors} companies with missing submissions")
+    print(f"  Transformed {len(records):,} companies")
+
+    table = pa.Table.from_pylist(records, schema=COMPANIES_SCHEMA)
+
+    validate(table, {
+        "columns": {"cik": "string", "name": "string"},
+        "not_null": ["cik", "name"],
+        "unique": ["cik"],
+        "min_rows": 10000,
+    })
+    assert_length(table, "cik", 10)
+
+    merge(table, COMPANIES_DATASET_ID, key="cik")
+    publish(COMPANIES_DATASET_ID, COMPANIES_METADATA)
+
+
+# =============================================================================
+# DAG
+# =============================================================================
+
+from nodes.company_tickers import download as download_tickers
 
 NODES = {
-    run: [company_tickers_run],
+    download: [download_tickers],
+    transform_filings: [download],
+    transform_companies: [download],
 }
 
 
 if __name__ == "__main__":
-    run()
+    download()
+    transform_filings()
+    transform_companies()
