@@ -5,6 +5,7 @@ Uses batched processing for memory efficiency.
 """
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from tqdm import tqdm
 from subsets_utils import (
     save_raw_json, load_raw_json,
@@ -167,16 +168,33 @@ def _extract_company_facts(cik: str) -> list[dict]:
     return records
 
 
+def _merge_batch(table: pa.Table, key: list[str]) -> pa.Table:
+    """Filter out rows with null merge keys and merge."""
+    # fiscal_year/fiscal_period can be null in SEC data (non-fiscal-period facts).
+    # Merge keys cannot contain nulls, so drop those rows before merging.
+    mask = pc.and_(pc.is_valid(table["fiscal_year"]), pc.is_valid(table["fiscal_period"]))
+    filtered = table.filter(mask)
+    dropped = len(table) - len(filtered)
+    if dropped > 0:
+        print(f"      Dropped {dropped:,} rows with null fiscal_year/fiscal_period")
+    if len(filtered) > 0:
+        merge(filtered, DATASET_ID, key=key)
+    return filtered
+
+
 def transform():
     """Transform XBRL facts with memory-efficient batching."""
     tickers = load_raw_json("company_tickers")
     print(f"  Processing XBRL facts from {len(tickers):,} companies in batches of {BATCH_SIZE}...")
+
+    merge_key = ["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period"]
 
     batch_records = []
     batch_num = 0
     companies_processed = 0
     companies_with_data = 0
     total_facts = 0
+    total_dropped = 0
     errors = 0
 
     for ticker_entry in tickers:
@@ -198,21 +216,25 @@ def transform():
         # Write batch when we hit batch size
         if companies_processed % BATCH_SIZE == 0 and batch_records:
             table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
-            merge(table, DATASET_ID, key=["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period"])
-            total_facts += len(batch_records)
-            print(f"    Batch {batch_num}: {len(batch_records):,} facts from {BATCH_SIZE} companies ({companies_processed:,}/{len(tickers):,})")
+            filtered = _merge_batch(table, merge_key)
+            total_facts += len(filtered)
+            total_dropped += len(table) - len(filtered)
+            print(f"    Batch {batch_num}: {len(filtered):,} facts from {BATCH_SIZE} companies ({companies_processed:,}/{len(tickers):,})")
             batch_num += 1
             batch_records.clear()
 
     # Write final partial batch
     if batch_records:
         table = pa.Table.from_pylist(batch_records, schema=SCHEMA)
-        merge(table, DATASET_ID, key=["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period"])
-        total_facts += len(batch_records)
-        print(f"    Batch {batch_num}: {len(batch_records):,} facts (final batch)")
+        filtered = _merge_batch(table, merge_key)
+        total_facts += len(filtered)
+        total_dropped += len(table) - len(filtered)
+        print(f"    Batch {batch_num}: {len(filtered):,} facts (final batch)")
 
     if errors > 0:
         print(f"  Skipped {errors} companies with missing XBRL data")
+    if total_dropped > 0:
+        print(f"  Dropped {total_dropped:,} facts with null fiscal_year/fiscal_period")
     print(f"  Wrote {total_facts:,} total facts from {companies_with_data:,} companies")
 
     assert total_facts >= 1000000, f"Expected >= 1,000,000 XBRL facts, got {total_facts:,}"
