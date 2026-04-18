@@ -187,7 +187,7 @@ def transform():
     tickers = load_raw_json("company_tickers")
     print(f"  Processing XBRL facts from {len(tickers):,} companies in batches of {BATCH_SIZE}...")
 
-    merge_key = ["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period"]
+    merge_key = ["cik", "taxonomy", "concept", "unit", "end_date", "fiscal_year", "fiscal_period", "accession"]
 
     batch_records = []
     batch_num = 0
